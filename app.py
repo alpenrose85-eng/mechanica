@@ -8,7 +8,6 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
-import openpyxl
 
 # Настройка страницы
 st.set_page_config(
@@ -33,15 +32,144 @@ st.markdown("""
         border-left: 5px solid #1E3A8A;
         margin: 1rem 0;
     }
-    .upload-section {
-        background-color: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border: 1px solid #dee2e6;
-        margin-bottom: 1rem;
-    }
 </style>
 """, unsafe_allow_html=True)
+
+def clean_number(text):
+    """Очистка и преобразование чисел из текста"""
+    if not text:
+        return 0
+    
+    # Убираем пробелы в числах (например, "3 363" -> "3363")
+    text = str(text).replace(' ', '')
+    
+    # Заменяем запятые на точки для десятичных чисел
+    text = text.replace(',', '.')
+    
+    # Убираем все нечисловые символы, кроме точки и цифр
+    text = re.sub(r'[^\d.]', '', text)
+    
+    try:
+        return float(text) if '.' in text else int(text)
+    except:
+        return 0
+
+def parse_protocol_from_docx(file_content):
+    """Парсинг данных из DOCX файла с протоколом"""
+    doc = Document(BytesIO(file_content))
+    
+    data_rows = []
+    
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            
+            # Ищем строку с клеймом образца
+            for i, cell_text in enumerate(cells):
+                if re.match(r'^\d+-\d+$', cell_text):
+                    try:
+                        sample_mark = cell_text
+                        
+                        # Извлекаем данные из строки
+                        # В таблице 14 колонок, данные находятся на определенных позициях
+                        if len(cells) >= 14:
+                            # Температура - 5-я колонка (индекс 5 в 0-based)
+                            temp_text = cells[5]
+                            temp_match = re.search(r'(\d+)', temp_text)
+                            temperature = int(temp_match.group(1)) if temp_match else 20
+                            
+                            # Предел прочности - 10-я колонка (индекс 10)
+                            strength_text = cells[10]
+                            strength = clean_number(strength_text)
+                            
+                            # Предел текучести - 11-я колонка (индекс 11)
+                            yield_text = cells[11]
+                            yield_strength = clean_number(yield_text)
+                            
+                            # Относительное сужение - 12-я колонка (индекс 12)
+                            reduction_text = cells[12]
+                            reduction = clean_number(reduction_text)
+                            
+                            # Относительное удлинение - 13-я колонка (индекс 13)
+                            elongation_text = cells[13]
+                            elongation = clean_number(elongation_text)
+                            
+                            data_rows.append({
+                                'Клеймо': sample_mark,
+                                'Температура': temperature,
+                                'Предел прочности': strength,
+                                'Предел текучести': yield_strength,
+                                'Отн. удл.': elongation,
+                                'Отн. суж.': reduction
+                            })
+                            
+                    except Exception as e:
+                        continue
+    
+    # Если не нашли данные в таблицах, пробуем парсить текст
+    if not data_rows:
+        return parse_protocol_from_text('\n'.join([p.text for p in doc.paragraphs]))
+    
+    return pd.DataFrame(data_rows)
+
+def parse_protocol_from_text(text):
+    """Парсинг данных из текста протокола"""
+    lines = text.split('\n')
+    data_rows = []
+    
+    for line in lines:
+        # Ищем строки с клеймом образца
+        if re.search(r'\d+-\d+', line) and any(x in line for x in ['МПа', '485', '297', '57', '30']):
+            # Убираем лишние пробелы
+            line_clean = re.sub(r'\s+', ' ', line.strip())
+            
+            # Разбиваем строку на части
+            parts = line_clean.split()
+            
+            # Ищем клеймо
+            for i, part in enumerate(parts):
+                if re.match(r'^\d+-\d+$', part):
+                    try:
+                        sample_mark = part
+                        
+                        # Ищем числовые значения после клейма
+                        numbers = []
+                        for j in range(i+1, len(parts)):
+                            # Очищаем каждое значение
+                            cleaned = clean_number(parts[j])
+                            if cleaned != 0:
+                                numbers.append(cleaned)
+                        
+                        # В таблице должно быть минимум 12 чисел после клейма
+                        if len(numbers) >= 12:
+                            # Температура - 3-е число после клейма
+                            temperature = int(numbers[2]) if len(numbers) > 2 else 20
+                            
+                            # Предел прочности - 8-е число после клейма
+                            strength = numbers[7] if len(numbers) > 7 else 0
+                            
+                            # Предел текучести - 9-е число после клейма
+                            yield_strength = numbers[8] if len(numbers) > 8 else 0
+                            
+                            # Относительное сужение - 10-е число после клейма
+                            reduction = numbers[9] if len(numbers) > 9 else 0
+                            
+                            # Относительное удлинение - 11-е число после клейма
+                            elongation = numbers[10] if len(numbers) > 10 else 0
+                            
+                            data_rows.append({
+                                'Клеймо': sample_mark,
+                                'Температура': temperature,
+                                'Предел прочности': strength,
+                                'Предел текучести': yield_strength,
+                                'Отн. удл.': elongation,
+                                'Отн. суж.': reduction
+                            })
+                            
+                    except Exception as e:
+                        continue
+    
+    return pd.DataFrame(data_rows)
 
 def interpolate_yield_strength(temp):
     """Линейная интерполяция нормативного предела текучести для стали марки 20"""
@@ -77,7 +205,6 @@ def parse_mapping_file(mapping_file):
     """Парсинг файла соответствия названий образцов"""
     try:
         if mapping_file.name.endswith('.xlsx'):
-            # Читаем Excel файл
             df_mapping = pd.read_excel(mapping_file, header=None)
         else:
             return {}
@@ -94,7 +221,6 @@ def parse_mapping_file(mapping_file):
                 
                 # Извлекаем числовую часть из лабораторного номера
                 try:
-                    # Пытаемся извлечь первое число из строки
                     numbers = re.findall(r'\d+', lab_number)
                     if numbers:
                         pipe_num = int(numbers[0])
@@ -106,101 +232,20 @@ def parse_mapping_file(mapping_file):
                 except ValueError:
                     continue
         
-        # Теперь сортируем строки по индексу в порядке возрастания (сверху вниз)
+        # Сортируем строки по индексу в порядке возрастания (сверху вниз)
         rows.sort(key=lambda x: x['index'])
         
         # Присваиваем порядок от 1 до N (сохраняя порядок из файла)
         for order, row in enumerate(rows, 1):
             mapping[row['pipe_num']] = {
                 'new_name': row['new_name'],
-                'order': order  # Порядок из файла (сверху вниз)
+                'order': order
             }
         
         return mapping
     except Exception as e:
         st.error(f"Ошибка при чтении файла соответствия: {str(e)}")
         return {}
-
-def parse_protocol_from_docx(file_content):
-    """Парсинг данных из DOCX файла с протоколом"""
-    doc = Document(BytesIO(file_content))
-    
-    data_rows = []
-    
-    for table in doc.tables:
-        for i, row in enumerate(table.rows):
-            cells = [cell.text.strip() for cell in row.cells]
-            
-            for cell_text in cells:
-                if re.match(r'^\d+-\d+$', cell_text):
-                    try:
-                        sample_mark = cell_text
-                        
-                        # Извлекаем все числа из строки
-                        row_text = ' '.join(cells)
-                        numbers = re.findall(r'[\d]+[.,]?\d*', row_text)
-                        numbers = [float(num.replace(',', '.').replace(' ', '')) for num in numbers if num]
-                        
-                        if len(numbers) >= 13:
-                            temperature = int(numbers[3]) if len(numbers) > 3 else 20
-                            strength = numbers[9] if len(numbers) > 9 else 0
-                            yield_strength = numbers[10] if len(numbers) > 10 else 0
-                            reduction = numbers[11] if len(numbers) > 11 else 0
-                            elongation = numbers[12] if len(numbers) > 12 else 0
-                            
-                            data_rows.append({
-                                'Клеймо': sample_mark,
-                                'Температура': temperature,
-                                'Предел прочности': strength,
-                                'Предел текучести': yield_strength,
-                                'Отн. удл.': elongation,
-                                'Отн. суж.': reduction
-                            })
-                            
-                    except Exception as e:
-                        continue
-    
-    if not data_rows:
-        return parse_protocol_from_text('\n'.join([p.text for p in doc.paragraphs]))
-    
-    return pd.DataFrame(data_rows)
-
-def parse_protocol_from_text(text):
-    """Парсинг данных из текста протокола"""
-    lines = text.split('\n')
-    data_rows = []
-    
-    for line in lines:
-        if re.search(r'\d+-\d+', line):
-            line_clean = re.sub(r'\s+', ' ', line.strip())
-            numbers = re.findall(r'[\d]+[.,]?\d*', line_clean)
-            
-            if len(numbers) >= 13:
-                try:
-                    klem_match = re.search(r'(\d+-\d+)', line_clean)
-                    sample_mark = klem_match.group(1) if klem_match else ""
-                    
-                    nums = [float(num.replace(',', '.').replace(' ', '')) for num in numbers]
-                    
-                    temperature = int(nums[3]) if len(nums) > 3 else 20
-                    strength = nums[9] if len(nums) > 9 else 0
-                    yield_strength = nums[10] if len(nums) > 10 else 0
-                    reduction = nums[11] if len(nums) > 11 else 0
-                    elongation = nums[12] if len(nums) > 12 else 0
-                    
-                    data_rows.append({
-                        'Клеймо': sample_mark,
-                        'Температура': temperature,
-                        'Предел прочности': strength,
-                        'Предел текучести': yield_strength,
-                        'Отн. удл.': elongation,
-                        'Отн. суж.': reduction
-                    })
-                    
-                except Exception as e:
-                    continue
-    
-    return pd.DataFrame(data_rows)
 
 def get_test_data():
     """Возвращает тестовые данные из примера протокола"""
@@ -271,7 +316,7 @@ def create_detailed_dataframe(df, mapping=None):
             if pipe_num in mapping:
                 return mapping[pipe_num]['order']
             else:
-                return 999 + pipe_num  # Помещаем в конец
+                return 999 + pipe_num
         
         df['Порядок'] = df['Номер трубы'].apply(get_order)
         df['Новое название'] = df['Номер трубы'].apply(
@@ -380,7 +425,6 @@ def create_summary_table(df, mapping=None):
     
     # Определяем порядок
     if mapping:
-        # Создаем список для сортировки
         summary_rows = []
         for pipe_num in df['Номер трубы'].unique():
             pipe_data = df[df['Номер трубы'] == pipe_num]
@@ -536,7 +580,6 @@ def main():
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown('<div class="upload-section">', unsafe_allow_html=True)
         st.subheader("📄 Протокол испытаний")
         uploaded_protocol = st.file_uploader(
             "Загрузите протокол испытаний (DOCX)",
@@ -544,10 +587,8 @@ def main():
             key="protocol",
             help="Основной файл с результатами механических испытаний"
         )
-        st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
-        st.markdown('<div class="upload-section">', unsafe_allow_html=True)
         st.subheader("📊 Файл соответствия")
         uploaded_mapping = st.file_uploader(
             "Загрузите файл соответствия названий (Excel)",
@@ -555,7 +596,6 @@ def main():
             key="mapping",
             help="Excel файл с двумя столбцами: новое название и номер из протокола"
         )
-        st.markdown('</div>', unsafe_allow_html=True)
     
     # Боковая панель
     with st.sidebar:
@@ -563,7 +603,7 @@ def main():
         st.markdown("---")
         
         st.subheader("Параметры обработки")
-        use_test_data = st.checkbox("Использовать тестовые данные", value=False,
+        use_test_data = st.checkbox("Использовать тестовые данные", value=True,
                                    help="Использовать примерные данные для демонстрации")
         
         st.subheader("Нормативные значения")
@@ -573,31 +613,7 @@ def main():
         - 250°C: 196 МПа
         - 400°C: 137 МПа
         - 450°C: 127 МПа
-        
-        **Файл соответствия:**
-        Формат Excel с двумя столбцами:
-        - Столбец A: Новое название (например, "ПЭ(44)")
-        - Столбец B: Номер из протокола (например, "6")
         """)
-        
-        # Показываем пример файла соответствия
-        with st.expander("📋 Пример файла соответствия"):
-            st.write("""
-            | Новое название | Номер из протокола |
-            |----------------|--------------------|
-            | ПЭ(44)         | 6                  |
-            | ПЭ(103)        | 7                  |
-            | ЛЭ(89)         | 2                  |
-            | ЛЭ(107)        | 3                  |
-            | ЗЭ(64)         | 1                  |
-            
-            **Порядок в таблице будет сверху вниз, как в файле:**
-            1. ПЭ(44)
-            2. ПЭ(103) 
-            3. ЛЭ(89)
-            4. ЛЭ(107)
-            5. ЗЭ(64)
-            """)
     
     # Обработка файлов
     if uploaded_protocol is not None or use_test_data:
@@ -609,19 +625,6 @@ def main():
                     mapping = parse_mapping_file(uploaded_mapping)
                     if mapping:
                         st.success(f"✅ Загружено {len(mapping)} соответствий названий")
-                        
-                        # Показываем таблицу соответствия в правильном порядке
-                        with st.expander("📋 Просмотр соответствий (в порядке из файла)"):
-                            # Создаем DataFrame для отображения в порядке из файла
-                            mapping_list = []
-                            for pipe_num, info in sorted(mapping.items(), key=lambda x: x[1]['order']):
-                                mapping_list.append({
-                                    'Порядок в таблице': info['order'],
-                                    'Новое название': info['new_name'],
-                                    'Номер из протокола': pipe_num
-                                })
-                            mapping_df = pd.DataFrame(mapping_list)
-                            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
                 
                 # Получаем данные протокола
                 if use_test_data:
@@ -633,21 +636,9 @@ def main():
                     file_source = uploaded_protocol.name
                 
                 if df.empty:
-                    st.error("""
-                    ❌ Не удалось извлечь данные из файла.
-                    
-                    **Попробуйте:**
-                    1. Включить опцию "Использовать тестовые данные"
-                    2. Проверить формат таблицы в файле
-                    3. Убедиться, что данные содержат клейма в формате "X-Y"
-                    """)
+                    st.error("Не удалось извлечь данные из файла.")
+                    st.info("Попробуйте включить опцию 'Использовать тестовые данные'")
                     return
-                
-                # Округляем все числовые значения
-                numeric_cols = ['Предел прочности', 'Предел текучести', 'Отн. удл.', 'Отн. суж.']
-                for col in numeric_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
                 
                 # Создаем таблицы
                 detailed_df = create_detailed_dataframe(df, mapping)
@@ -664,53 +655,9 @@ def main():
                     temps = sorted(df['Температура'].unique())
                     st.metric("Температуры испытаний", f"{len(temps)} видов")
                 
-                # Показываем информацию о переименовании
-                if mapping:
-                    st.success(f"✅ Образцы переименованы согласно файлу соответствия. Использовано {len(mapping)} новых названий.")
-                    
-                    # Показываем порядок образцов в таблице
-                    with st.expander("📋 Порядок образцов в таблице"):
-                        order_list = []
-                        for pipe_num in df['Номер трубы'].unique():
-                            if pipe_num in mapping:
-                                order_list.append(f"{mapping[pipe_num]['order']}. {mapping[pipe_num]['new_name']} (труба {pipe_num})")
-                            else:
-                                order_list.append(f"Труба {pipe_num}")
-                        
-                        st.write("Образцы будут расположены в следующем порядке:")
-                        for item in order_list:
-                            st.write(f"- {item}")
-                
                 # Предпросмотр
                 st.subheader("📋 Предпросмотр основной таблицы")
                 st.dataframe(detailed_df, use_container_width=True, hide_index=True)
-                
-                # Показываем интерполяционные расчеты
-                with st.expander("📊 Расчет нормативных значений"):
-                    st.write("**Интерполяция предела текучести для стали марки 20:**")
-                    
-                    high_temps_unique = sorted([t for t in df['Температура'].unique() if t > 20])
-                    
-                    if high_temps_unique:
-                        st.write("| Температура, °C | Нормативный предел текучести, МПа | Примечание |")
-                        st.write("|-----------------|-----------------------------------|------------|")
-                        
-                        for temp in high_temps_unique:
-                            normative_value = interpolate_yield_strength(temp)
-                            
-                            if temp <= 250:
-                                interval = "20°C - 250°C"
-                                points = "216 МПа - 196 МПа"
-                            elif temp <= 400:
-                                interval = "250°C - 400°C"
-                                points = "196 МПа - 137 МПа"
-                            else:
-                                interval = "400°C - 450°C"
-                                points = "137 МПа - 127 МПа"
-                            
-                            st.write(f"| {temp} | {normative_value} | Интерполяция на интервале {interval} ({points}) |")
-                    else:
-                        st.write("Нет данных для повышенных температур")
                 
                 if not summary_df.empty:
                     st.subheader("📊 Предпросмотр сводной таблицы")
@@ -728,62 +675,15 @@ def main():
                     label="⬇️ Скачать отчет в Word",
                     data=doc_bytes,
                     file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    help="Файл содержит две таблицы: результаты испытаний и нормативные значения"
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 
-                # Информация о данных
-                with st.expander("📝 Информация о данных"):
-                    st.write(f"**Источник:** {file_source}")
-                    st.write(f"**Всего записей:** {len(df)}")
-                    
-                    if mapping:
-                        st.write(f"**Соответствия загружены:** Да ({len(mapping)} записей)")
-                    else:
-                        st.write(f"**Соответствия загружены:** Нет (используются стандартные названия)")
-                    
-                    st.write(f"**Температуры испытаний:** {sorted(df['Температура'].unique())}°C")
-                    st.write(f"**Диапазон прочности:** {df['Предел прочности'].min():.0f} - {df['Предел прочности'].max():.0f} МПа")
-                    st.write(f"**Диапазон текучести:** {df['Предел текучести'].min():.0f} - {df['Предел текучести'].max():.0f} МПа")
-                    
         except Exception as e:
             st.error(f"Ошибка при обработке: {str(e)}")
-            st.info("Попробуйте включить опцию 'Использовать тестовые данные' для проверки работы программы")
     
     else:
         # Инструкция
         st.info("👈 Загрузите протокол испытаний (DOCX файл) для начала обработки")
-        
-        with st.expander("📋 Пример работы программы"):
-            st.markdown("""
-            **Пример файла соответствия:**
-            ```
-            | Новое название | Номер из протокола |
-            |----------------|--------------------|
-            | ПЭ(44)         | 6                  |
-            | ПЭ(103)        | 7                  |
-            | ЛЭ(89)         | 2                  |
-            | ЛЭ(107)        | 3                  |
-            | ЗЭ(64)         | 1                  |
-            ```
-            
-            **Порядок в таблице будет:**
-            1. ПЭ(44) (труба 6) - первый в файле
-            2. ПЭ(103) (труба 7) - второй в файле  
-            3. ЛЭ(89) (труба 2) - третий в файле
-            4. ЛЭ(107) (труба 3) - четвертый в файле
-            5. ЗЭ(64) (труба 1) - пятый в файле
-            
-            **Что делает программа:**
-            1. Читает файл соответствия сверху вниз
-            2. Сохраняет порядок строк из файла
-            3. Применяет этот порядок к образцам в таблице
-            4. Образцы без соответствия идут в конце в числовом порядке
-            
-            **Выходные таблицы:**
-            1. Основная таблица с образцами в порядке из файла соответствия
-            2. Сводная таблица со средними пределами текучести при повышенных температурах
-            """)
 
 if __name__ == "__main__":
     main()

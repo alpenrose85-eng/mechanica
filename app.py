@@ -417,7 +417,7 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
             # Добавляем строку со средними значениями (Среднее в столбце температуры)
             if len(temp_data) > 0:
                 avg_row = {
-                    'Образец': pipe_name,
+                    'Образец': '',  # Пустое значение для объединения ячеек
                     'Температура, °C': 'Среднее',
                     'Предел прочности, МПа': int(round(temp_data['Предел прочности'].mean())),
                     'Предел текучести, МПа': int(round(temp_data['Предел текучести'].mean())),
@@ -453,6 +453,8 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
     steel_data = STEEL_GRADES.get(steel_grade, STEEL_GRADES['20'])
     
     normative_start = len(detailed_rows)
+    
+    # Добавляем нормативные значения для комнатной температуры (20°C)
     detailed_rows.append({
         'Образец': f'Требования для {steel_data["name"]}',
         'Температура, °C': 20,
@@ -469,13 +471,17 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
         normative_yield = get_interpolated_yield(steel_grade, temp)
         
         detailed_rows.append({
-            'Образец': f'Требования для {steel_data["name"]}',
+            'Образец': '',  # Пустое значение для объединения ячеек
             'Температура, °C': temp,
             'Предел прочности, МПа': '-',
             'Предел текучести, МПа': f'не менее {normative_yield}',
             'Отн. удл., %': '-',
             'Отн. суж., %': '-'
         })
+    
+    # Запоминаем границы для нормативных значений
+    normative_end = len(detailed_rows) - 1
+    sample_boundaries.append((normative_start, normative_end, f'Требования для {steel_data["name"]}'))
     
     detailed_df = pd.DataFrame(detailed_rows)
     return detailed_df, non_conformities, sample_boundaries
@@ -571,7 +577,7 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, sa
         # Определяем, где начинаются нормативные значения (после всех образцов)
         normative_start = None
         for i, row in detailed_df.iterrows():
-            if 'Требования' in str(row['Образец']):
+            if 'Требования' in str(row.get('Образец', '')):
                 normative_start = i
                 break
         
@@ -597,8 +603,8 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, sa
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 
-                # Жирный шрифт для средних значений и нормативных строк
-                if 'Среднее' in value or 'Требования' in str(row.get('Образец', '')):
+                # Жирный шрифт для средних значений
+                if 'Среднее' in value:
                     cell.paragraphs[0].runs[0].font.bold = True
                 
                 # Выделение красным для несоответствий (только для строк с образцами, не для нормативных)
@@ -607,7 +613,7 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, sa
                         for run in paragraph.runs:
                             run.font.color.rgb = RGBColor(255, 0, 0)
         
-        # Объединение ячеек для названий образцов
+        # Объединение ячеек для названий образцов и нормативных требований
         for start_idx, end_idx, pipe_name in sample_boundaries:
             if start_idx <= end_idx:
                 # Объединяем ячейки в первом столбце от start_idx+1 до end_idx+1
@@ -616,16 +622,24 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, sa
                 end_cell = table1.cell(end_idx + 1, 0)
                 start_cell.merge(end_cell)
                 
+                # Устанавливаем название образца/требований в объединенную ячейку
+                start_cell.text = str(pipe_name)
+                
                 # Центрируем текст по вертикали и горизонтали
                 start_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 start_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                
+                # Жирный шрифт для нормативных требований
+                if 'Требования' in pipe_name:
+                    start_cell.paragraphs[0].runs[0].font.bold = True
     
     doc.add_page_break()
     
     # Таблица 2
     if not summary_df.empty:
         if high_temps:
-            temp_str = ", ".join(map(str, high_temps))
+            # Если есть несколько повышенных температур, используем первую
+            temp_str = str(high_temps[0]) if high_temps else "403"
             title2 = doc.add_paragraph(f'2. Средние пределы текучести при повышенной температуре ({temp_str}°C)')
         else:
             title2 = doc.add_paragraph('2. Средние пределы текучести при повышенной температуре')
@@ -779,7 +793,7 @@ def main():
                     st.write("2. Убраны лабораторные клейма образцов")
                     st.write("3. В столбце температуры для средних значений указано 'Среднее'")
                     st.write("4. Несоответствующие значения выделены красным цветом")
-                    st.write("5. Нормативные значения добавлены в конец таблицы")
+                    st.write("5. Нормативные значения добавлены в конец таблицы с объединенным первым столбцом")
                 
                 if not summary_df.empty:
                     st.subheader("📊 Предпросмотр сводной таблицы")

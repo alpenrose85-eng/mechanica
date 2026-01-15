@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from io import BytesIO
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 
@@ -32,8 +32,132 @@ st.markdown("""
         border-left: 5px solid #1E3A8A;
         margin: 1rem 0;
     }
+    .warning-box {
+        background-color: #fff3cd;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #ffc107;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# Нормативные значения для разных марок стали
+STEEL_GRADES = {
+    '20': {
+        'name': 'Сталь марки 20',
+        'room_temp': {
+            'strength_range': (412, 549),
+            'yield_min': 216,
+            'elongation_min': 24,
+            'reduction_min': 45
+        },
+        'high_temp_points': [
+            (250, 196),
+            (400, 137),
+            (450, 127)
+        ],
+        'description': 'Углеродистая качественная конструкционная сталь'
+    },
+    '12Х1МФ': {
+        'name': 'Сталь марки 12Х1МФ',
+        'room_temp': {
+            'strength_range': (441, 637),
+            'yield_min': 274,
+            'elongation_min': 21,
+            'reduction_min': 55
+        },
+        'high_temp_points': [
+            (400, 216),
+            (450, 206)
+        ],
+        'description': 'Жаропрочная хромомолибденованадиевая сталь'
+    }
+}
+
+def get_interpolated_yield(steel_grade, temp):
+    """Линейная интерполяция нормативного предела текучести для выбранной марки стали"""
+    if steel_grade not in STEEL_GRADES:
+        return 0
+    
+    steel_data = STEEL_GRADES[steel_grade]
+    
+    # Если температура 20°C или ниже, используем комнатное значение
+    if temp <= 20:
+        return steel_data['room_temp']['yield_min']
+    
+    # Если температура выше максимальной из известных точек
+    max_temp = max(t for t, _ in steel_data['high_temp_points'])
+    if temp > max_temp:
+        # Используем значение для максимальной температуры
+        for t, value in reversed(steel_data['high_temp_points']):
+            if t == max_temp:
+                return value
+    
+    # Находим две ближайшие точки для интерполяции
+    sorted_points = sorted(steel_data['high_temp_points'])
+    
+    # Если температура меньше минимальной известной
+    min_temp = sorted_points[0][0]
+    if temp < min_temp:
+        # Интерполируем между комнатной температурой и первой точкой
+        room_yield = steel_data['room_temp']['yield_min']
+        first_temp, first_yield = sorted_points[0]
+        
+        if first_temp <= 20:
+            return first_yield
+        
+        result = room_yield + (first_yield - room_yield) * (temp - 20) / (first_temp - 20)
+        return round(result)
+    
+    # Ищем интервал для интерполяции
+    for i in range(len(sorted_points) - 1):
+        t1, y1 = sorted_points[i]
+        t2, y2 = sorted_points[i + 1]
+        
+        if t1 <= temp <= t2:
+            # Линейная интерполяция
+            result = y1 + (y2 - y1) * (temp - t1) / (t2 - t1)
+            return round(result)
+    
+    # Если не нашли подходящий интервал, возвращаем значение для максимальной температуры
+    return sorted_points[-1][1]
+
+def check_against_normative(value, temp, param, steel_grade, is_high_temp=False):
+    """Проверка значения на соответствие нормативу"""
+    if steel_grade not in STEEL_GRADES:
+        return True  # Если марка стали не определена, считаем что соответствует
+    
+    steel_data = STEEL_GRADES[steel_grade]
+    
+    try:
+        num_value = float(value)
+    except:
+        return True  # Если не число, пропускаем проверку
+    
+    if temp <= 20 or not is_high_temp:
+        # Проверка для комнатной температуры
+        if param == 'strength':
+            min_val, max_val = steel_data['room_temp']['strength_range']
+            return min_val <= num_value <= max_val
+        elif param == 'yield':
+            min_val = steel_data['room_temp']['yield_min']
+            return num_value >= min_val
+        elif param == 'elongation':
+            min_val = steel_data['room_temp']['elongation_min']
+            return num_value >= min_val
+        elif param == 'reduction':
+            min_val = steel_data['room_temp']['reduction_min']
+            return num_value >= min_val
+    else:
+        # Проверка для повышенной температуры
+        if param == 'yield':
+            normative_value = get_interpolated_yield(steel_grade, temp)
+            return num_value >= normative_value
+        # Для других параметров при повышенной температуре нормативы не заданы
+        return True
+    
+    return True
 
 def clean_number(text):
     """Очистка и преобразование чисел из текста"""
@@ -71,7 +195,6 @@ def parse_protocol_from_docx(file_content):
                         sample_mark = cell_text
                         
                         # Извлекаем данные из строки
-                        # В таблице 14 колонок, данные находятся на определенных позициях
                         if len(cells) >= 14:
                             # Температура - 5-я колонка (индекс 5 в 0-based)
                             temp_text = cells[5]
@@ -171,36 +294,6 @@ def parse_protocol_from_text(text):
     
     return pd.DataFrame(data_rows)
 
-def interpolate_yield_strength(temp):
-    """Линейная интерполяция нормативного предела текучести для стали марки 20"""
-    known_points = [
-        (20, 216),
-        (250, 196),
-        (400, 137),
-        (450, 127)
-    ]
-    
-    for t, value in known_points:
-        if temp == t:
-            return value
-    
-    if temp < 20:
-        return 216
-    elif 20 < temp <= 250:
-        x1, y1 = 20, 216
-        x2, y2 = 250, 196
-    elif 250 < temp <= 400:
-        x1, y1 = 250, 196
-        x2, y2 = 400, 137
-    elif 400 < temp <= 450:
-        x1, y1 = 400, 137
-        x2, y2 = 450, 127
-    else:
-        return 127
-    
-    result = y1 + (y2 - y1) * (temp - x1) / (x2 - x1)
-    return round(result)
-
 def parse_mapping_file(mapping_file):
     """Парсинг файла соответствия названий образцов"""
     try:
@@ -282,10 +375,10 @@ def get_test_data():
     
     return pd.DataFrame(test_data)
 
-def create_detailed_dataframe(df, mapping=None):
+def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
     """Создание детализированной таблицы с добавлением нормативных значений"""
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), []
     
     # Извлекаем номер трубы из клейма
     df['Номер трубы'] = df['Клеймо'].apply(lambda x: int(x.split('-')[0]) if '-' in str(x) else 0)
@@ -331,6 +424,10 @@ def create_detailed_dataframe(df, mapping=None):
         ordered_pipes = sorted(df['Номер трубы'].unique())
     
     detailed_rows = []
+    # Для хранения информации о несоответствиях (индекс строки, индекс колонки)
+    non_conformities = []
+    
+    row_index = 0
     
     # Проходим по трубам в нужном порядке
     for pipe_num in ordered_pipes:
@@ -348,7 +445,7 @@ def create_detailed_dataframe(df, mapping=None):
             
             # Добавляем строки для каждого образца
             for _, row in temp_data.iterrows():
-                detailed_rows.append({
+                row_data = {
                     'Образец': pipe_name,
                     'Клеймо образца (лаборатория)': row['Клеймо'],
                     'Температура, °C': temp,
@@ -356,11 +453,29 @@ def create_detailed_dataframe(df, mapping=None):
                     'Предел текучести, МПа': int(round(row['Предел текучести'])),
                     'Отн. удл., %': int(round(row['Отн. удл.'])),
                     'Отн. суж., %': int(round(row['Отн. суж.']))
-                })
+                }
+                detailed_rows.append(row_data)
+                
+                # Проверяем на соответствие нормативам
+                row_index = len(detailed_rows) - 1
+                if temp <= 20:
+                    # Проверяем все параметры для комнатной температуры
+                    if not check_against_normative(row_data['Предел прочности, МПа'], temp, 'strength', steel_grade):
+                        non_conformities.append((row_index, 3))  # Колонка 3 - предел прочности
+                    if not check_against_normative(row_data['Предел текучести, МПа'], temp, 'yield', steel_grade):
+                        non_conformities.append((row_index, 4))  # Колонка 4 - предел текучести
+                    if not check_against_normative(row_data['Отн. удл., %'], temp, 'elongation', steel_grade):
+                        non_conformities.append((row_index, 5))  # Колонка 5 - относительное удлинение
+                    if not check_against_normative(row_data['Отн. суж., %'], temp, 'reduction', steel_grade):
+                        non_conformities.append((row_index, 6))  # Колонка 6 - относительное сужение
+                else:
+                    # Для повышенной температуры проверяем только предел текучести
+                    if not check_against_normative(row_data['Предел текучести, МПа'], temp, 'yield', steel_grade, is_high_temp=True):
+                        non_conformities.append((row_index, 4))  # Колонка 4 - предел текучести
             
             # Добавляем строку со средними значениями
             if len(temp_data) > 0:
-                detailed_rows.append({
+                avg_row = {
                     'Образец': pipe_name,
                     'Клеймо образца (лаборатория)': 'Среднее',
                     'Температура, °C': temp,
@@ -368,7 +483,23 @@ def create_detailed_dataframe(df, mapping=None):
                     'Предел текучести, МПа': int(round(temp_data['Предел текучести'].mean())),
                     'Отн. удл., %': int(round(temp_data['Отн. удл.'].mean())),
                     'Отн. суж., %': int(round(temp_data['Отн. суж.'].mean()))
-                })
+                }
+                detailed_rows.append(avg_row)
+                
+                # Проверяем средние значения на соответствие нормативам
+                row_index = len(detailed_rows) - 1
+                if temp <= 20:
+                    if not check_against_normative(avg_row['Предел прочности, МПа'], temp, 'strength', steel_grade):
+                        non_conformities.append((row_index, 3))
+                    if not check_against_normative(avg_row['Предел текучести, МПа'], temp, 'yield', steel_grade):
+                        non_conformities.append((row_index, 4))
+                    if not check_against_normative(avg_row['Отн. удл., %'], temp, 'elongation', steel_grade):
+                        non_conformities.append((row_index, 5))
+                    if not check_against_normative(avg_row['Отн. суж., %'], temp, 'reduction', steel_grade):
+                        non_conformities.append((row_index, 6))
+                else:
+                    if not check_against_normative(avg_row['Предел текучести, МПа'], temp, 'yield', steel_grade, is_high_temp=True):
+                        non_conformities.append((row_index, 4))
         
         # Добавляем пустую строку между образцами
         detailed_rows.append({
@@ -380,42 +511,48 @@ def create_detailed_dataframe(df, mapping=None):
             'Отн. удл., %': '',
             'Отн. суж., %': ''
         })
+        row_index += 1
     
     # Удаляем последнюю пустую строку
     if detailed_rows and all(v == '' for v in detailed_rows[-1].values()):
         detailed_rows.pop()
+        row_index -= 1
     
     # Добавляем нормативные значения
+    steel_data = STEEL_GRADES.get(steel_grade, STEEL_GRADES['20'])
+    
+    # Нормативные значения для комнатной температуры
+    normative_start_index = len(detailed_rows)
     detailed_rows.append({
-        'Образец': 'Требования [3] для стали марки 20',
+        'Образец': f'Требования для {steel_data["name"]}',
         'Клеймо образца (лаборатория)': '',
         'Температура, °C': 20,
-        'Предел прочности, МПа': '412-549',
-        'Предел текучести, МПа': 216,
-        'Отн. удл., %': 24,
-        'Отн. суж., %': 45
+        'Предел прочности, МПа': f'{steel_data["room_temp"]["strength_range"][0]}-{steel_data["room_temp"]["strength_range"][1]}',
+        'Предел текучести, МПа': f'не менее {steel_data["room_temp"]["yield_min"]}',
+        'Отн. удл., %': f'не менее {steel_data["room_temp"]["elongation_min"]}',
+        'Отн. суж., %': f'не менее {steel_data["room_temp"]["reduction_min"]}'
     })
     
     # Добавляем нормативные значения для повышенных температур, которые есть в данных
     unique_temps = sorted([t for t in df['Температура'].unique() if t > 20])
     
     for temp in unique_temps:
-        normative_yield = interpolate_yield_strength(temp)
+        normative_yield = get_interpolated_yield(steel_grade, temp)
         
         detailed_rows.append({
-            'Образец': 'Требования [3] для стали марки 20',
+            'Образец': f'Требования для {steel_data["name"]}',
             'Клеймо образца (лаборатория)': '',
             'Температура, °C': temp,
             'Предел прочности, МПа': '-',
-            'Предел текучести, МПа': normative_yield,
+            'Предел текучести, МПа': f'не менее {normative_yield}',
             'Отн. удл., %': '-',
             'Отн. суж., %': '-'
         })
     
     detailed_df = pd.DataFrame(detailed_rows)
-    return detailed_df
+    return detailed_df, non_conformities
 
-def create_summary_table(df, mapping=None):
+def create_summary_table(df, mapping=None, steel_grade='20'):
     """Создание сводной таблицы"""
     if df.empty:
         return pd.DataFrame(), []
@@ -469,7 +606,7 @@ def create_summary_table(df, mapping=None):
     temperatures_above_20 = sorted([t for t in df['Температура'].unique() if t > 20])
     return summary_df, temperatures_above_20
 
-def create_word_report(detailed_df, summary_df, high_temps):
+def create_word_report(detailed_df, summary_df, high_temps, non_conformities, steel_grade='20'):
     """Создание Word документа с таблицами"""
     doc = Document()
     
@@ -483,6 +620,11 @@ def create_word_report(detailed_df, summary_df, high_temps):
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.runs[0].font.size = Pt(14)
     title.runs[0].bold = True
+    
+    # Информация о марке стали
+    steel_info = STEEL_GRADES.get(steel_grade, STEEL_GRADES['20'])
+    steel_para = doc.add_paragraph(f'Марка стали для сравнения: {steel_info["name"]}')
+    steel_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # Дата
     date_para = doc.add_paragraph()
@@ -523,6 +665,12 @@ def create_word_report(detailed_df, summary_df, high_temps):
                 # Жирный шрифт для средних значений и нормативных строк
                 if 'Среднее' in value or 'Требования' in str(row.get('Образец', '')):
                     cell.paragraphs[0].runs[0].font.bold = True
+                
+                # Выделение красным для несоответствий
+                if (i, j) in non_conformities:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.color.rgb = RGBColor(255, 0, 0)  # Красный цвет
     
     doc.add_page_break()
     
@@ -606,14 +754,32 @@ def main():
         use_test_data = st.checkbox("Использовать тестовые данные", value=True,
                                    help="Использовать примерные данные для демонстрации")
         
-        st.subheader("Нормативные значения")
-        st.markdown("""
-        **Сталь марки 20:**
-        - 20°C: 216 МПа
-        - 250°C: 196 МПа
-        - 400°C: 137 МПа
-        - 450°C: 127 МПа
-        """)
+        st.subheader("Выбор марки стали")
+        steel_grade = st.selectbox(
+            "Выберите марку стали для сравнения:",
+            options=list(STEEL_GRADES.keys()),
+            format_func=lambda x: STEEL_GRADES[x]['name'],
+            index=0
+        )
+        
+        # Показываем информацию о выбранной марке стали
+        steel_info = STEEL_GRADES[steel_grade]
+        with st.expander(f"📋 Нормативные значения для {steel_info['name']}"):
+            st.write(f"**Описание:** {steel_info['description']}")
+            st.write("**При 20°C:**")
+            st.write(f"- Предел прочности: {steel_info['room_temp']['strength_range'][0]}-{steel_info['room_temp']['strength_range'][1]} МПа")
+            st.write(f"- Предел текучести: не менее {steel_info['room_temp']['yield_min']} МПа")
+            st.write(f"- Относительное удлинение: не менее {steel_info['room_temp']['elongation_min']}%")
+            st.write(f"- Относительное сужение: не менее {steel_info['room_temp']['reduction_min']}%")
+            
+            if steel_info['high_temp_points']:
+                st.write("**При повышенных температурах:**")
+                for temp, value in sorted(steel_info['high_temp_points']):
+                    st.write(f"- {temp}°C: предел текучести не менее {value} МПа")
+            
+            st.write("**Примечание:**")
+            st.write("- Значения, не соответствующие нормативам, выделяются красным цветом")
+            st.write("- Для промежуточных температур используется линейная интерполяция")
     
     # Обработка файлов
     if uploaded_protocol is not None or use_test_data:
@@ -641,8 +807,8 @@ def main():
                     return
                 
                 # Создаем таблицы
-                detailed_df = create_detailed_dataframe(df, mapping)
-                summary_df, high_temps = create_summary_table(df, mapping)
+                detailed_df, non_conformities = create_detailed_dataframe(df, mapping, steel_grade)
+                summary_df, high_temps = create_summary_table(df, mapping, steel_grade)
                 
                 # Показываем статистику
                 col1, col2, col3 = st.columns(3)
@@ -655,9 +821,67 @@ def main():
                     temps = sorted(df['Температура'].unique())
                     st.metric("Температуры испытаний", f"{len(temps)} видов")
                 
+                # Показываем информацию о несоответствиях
+                if non_conformities:
+                    st.markdown(f"""
+                    <div class="warning-box">
+                    <h4>⚠️ Найдены несоответствия нормативным значениям</h4>
+                    <p>Обнаружено <strong>{len(non_conformities)} значений</strong>, не соответствующих нормативам для {STEEL_GRADES[steel_grade]['name']}.</p>
+                    <p>В таблице Word эти значения будут выделены <span style="color: red;">красным цветом</span>.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Показываем детали несоответствий
+                    with st.expander("📋 Детали несоответствий"):
+                        st.write("**Несоответствующие нормативу значения:**")
+                        for row_idx, col_idx in non_conformities:
+                            row = detailed_df.iloc[row_idx]
+                            if row_idx < len(detailed_df):
+                                col_names = ['Образец', 'Клеймо', 'Температура', 'Предел прочности', 'Предел текучести', 'Отн. удл.', 'Отн. суж.']
+                                param_name = col_names[col_idx] if col_idx < len(col_names) else f"Колонка {col_idx}"
+                                st.write(f"- {row['Образец']} ({row['Клеймо образца (лаборатория)']}), {row['Температура, °C']}°C: {param_name} = {row.iloc[col_idx]}")
+                
                 # Предпросмотр
                 st.subheader("📋 Предпросмотр основной таблицы")
                 st.dataframe(detailed_df, use_container_width=True, hide_index=True)
+                
+                # Показываем интерполяционные расчеты
+                with st.expander("📊 Расчет нормативных значений"):
+                    st.write(f"**Интерполяция предела текучести для {STEEL_GRADES[steel_grade]['name']}:**")
+                    
+                    high_temps_unique = sorted([t for t in df['Температура'].unique() if t > 20])
+                    
+                    if high_temps_unique:
+                        st.write("| Температура, °C | Нормативный предел текучести, МПа | Примечание |")
+                        st.write("|-----------------|-----------------------------------|------------|")
+                        
+                        for temp in high_temps_unique:
+                            normative_value = get_interpolated_yield(steel_grade, temp)
+                            
+                            # Определяем ближайшие точки
+                            steel_info = STEEL_GRADES[steel_grade]
+                            points = steel_info['high_temp_points']
+                            sorted_points = sorted(points)
+                            
+                            if temp <= sorted_points[0][0]:
+                                interval = f"20°C - {sorted_points[0][0]}°C"
+                                points_desc = f"{steel_info['room_temp']['yield_min']} МПа - {sorted_points[0][1]} МПа"
+                            elif temp >= sorted_points[-1][0]:
+                                interval = f"{sorted_points[-1][0]}°C и выше"
+                                points_desc = f"{sorted_points[-1][1]} МПа"
+                            else:
+                                # Находим интервал
+                                for i in range(len(sorted_points) - 1):
+                                    t1, y1 = sorted_points[i]
+                                    t2, y2 = sorted_points[i + 1]
+                                    if t1 <= temp <= t2:
+                                        interval = f"{t1}°C - {t2}°C"
+                                        points_desc = f"{y1} МПа - {y2} МПа"
+                                        break
+                            
+                            st.write(f"| {temp} | {normative_value} | Интерполяция на интервале {interval} ({points_desc}) |")
+                    else:
+                        st.write("Нет данных для повышенных температур")
                 
                 if not summary_df.empty:
                     st.subheader("📊 Предпросмотр сводной таблицы")
@@ -666,16 +890,17 @@ def main():
                 # Создание Word документа
                 st.subheader("📥 Скачать отчет")
                 
-                doc_bytes = create_word_report(detailed_df, summary_df, high_temps)
+                doc_bytes = create_word_report(detailed_df, summary_df, high_temps, non_conformities, steel_grade)
                 
                 # Кнопка скачивания
-                filename = f"Таблица_механических_свойств_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+                filename = f"Таблица_механических_свойств_{steel_grade}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
                 
                 st.download_button(
-                    label="⬇️ Скачать отчет в Word",
+                    label=f"⬇️ Скачать отчет в Word ({STEEL_GRADES[steel_grade]['name']})",
                     data=doc_bytes,
                     file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    help="Файл содержит две таблицы с выделением несоответствующих значений красным цветом"
                 )
                 
         except Exception as e:
@@ -684,6 +909,23 @@ def main():
     else:
         # Инструкция
         st.info("👈 Загрузите протокол испытаний (DOCX файл) для начала обработки")
+        
+        # Показываем информацию о марках стали
+        with st.expander("📋 Поддерживаемые марки стали"):
+            for grade, info in STEEL_GRADES.items():
+                st.write(f"**{info['name']}** ({grade})")
+                st.write(f"*{info['description']}*")
+                st.write(f"- Предел прочности при 20°C: {info['room_temp']['strength_range'][0]}-{info['room_temp']['strength_range'][1]} МПа")
+                st.write(f"- Предел текучести при 20°C: не менее {info['room_temp']['yield_min']} МПа")
+                st.write(f"- Относительное удлинение: не менее {info['room_temp']['elongation_min']}%")
+                st.write(f"- Относительное сужение: не менее {info['room_temp']['reduction_min']}%")
+                
+                if info['high_temp_points']:
+                    st.write("- Предел текучести при повышенных температурах:")
+                    for temp, value in sorted(info['high_temp_points']):
+                        st.write(f"  - {temp}°C: не менее {value} МПа")
+                
+                st.write("---")
 
 if __name__ == "__main__":
     main()

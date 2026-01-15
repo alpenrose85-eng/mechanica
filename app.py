@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from io import BytesIO
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 
@@ -31,15 +31,6 @@ st.markdown("""
         border-radius: 10px;
         border-left: 5px solid #1E3A8A;
         margin: 1rem 0;
-    }
-    .stButton > button {
-        background-color: #1E3A8A;
-        color: white;
-        font-weight: bold;
-    }
-    .normative-row {
-        background-color: #fffacd !important;
-        font-weight: bold !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -91,108 +82,54 @@ def interpolate_yield_strength(temp):
     # Округление до целого
     return round(result)
 
-def parse_docx_table(file_content):
-    """Парсинг таблицы из DOCX файла"""
+def parse_protocol_from_docx(file_content):
+    """Парсинг данных из DOCX файла с протоколом"""
     doc = Document(BytesIO(file_content))
     
-    all_data = []
-    
     # Ищем таблицы в документе
+    data_rows = []
+    
     for table in doc.tables:
+        # Проходим по всем строкам таблицы
         for i, row in enumerate(table.rows):
-            row_data = [cell.text.strip() for cell in row.cells]
+            cells = [cell.text.strip() for cell in row.cells]
             
-            # Пытаемся найти строку с клеймом образца
-            for cell_text in row_data:
-                # Ищем клеймо в формате X-Y (например, 1-1, 2-3 и т.д.)
+            # Ищем строки с клеймом образца (формат X-Y)
+            for cell_text in cells:
                 if re.match(r'^\d+-\d+$', cell_text):
                     try:
                         sample_mark = cell_text
                         
-                        # Пытаемся извлечь данные из строки
-                        # Очистка и преобразование чисел
-                        def clean_number(text):
-                            if not text:
-                                return 0
-                            # Убираем пробелы в числах (например, "3 363" -> "3363")
-                            text = str(text).replace(' ', '').replace(',', '.')
-                            # Убираем все нечисловые символы, кроме точки, минуса и цифр
-                            text = re.sub(r'[^\d.-]', '', text)
-                            try:
-                                return float(text) if '.' in text else int(text)
-                            except:
-                                return 0
+                        # На основе структуры вашей таблицы определяем индексы
+                        # В вашей таблице данные расположены в определенных колонках
+                        # По образцу из файла:
+                        # | Клеймо | Длина | Диаметр | Площадь | Температура | Скорость | Диаметр после | Площадь после | Макс.нагрузка | Предел прочности | Предел текучести | Отн.сужение | Отн.удлинение |
+                        # | 1-1    | 15    | 2,97    | 6,93    | 20          | 1        | 1,94          | 2,96          | 3 363         | 485              | 297              | 57          | 30           |
                         
-                        # Поиск числовых значений в строке
-                        numbers = []
-                        for item in row_data:
-                            # Пытаемся извлечь числа из каждого элемента
-                            cleaned = clean_number(item)
-                            if cleaned != 0:
-                                numbers.append(cleaned)
+                        # Преобразуем все ячейки в строку для поиска
+                        row_text = ' '.join(cells)
                         
-                        # Пытаемся определить структуру по количеству чисел
-                        if len(numbers) >= 10:
-                            # Предполагаемая структура: номер, клеймо, L0, d0, F0, T, S, dk, Fk, P_max, σ_в, σ_0.2, Ψ, ε
-                            # Индексы могут отличаться, это приблизительно
-                            temperature = int(numbers[5]) if len(numbers) > 5 else 20
-                            strength = numbers[10] if len(numbers) > 10 else 0
-                            yield_strength = numbers[11] if len(numbers) > 11 else 0
-                            elongation = numbers[13] if len(numbers) > 13 else 0
-                            reduction = numbers[12] if len(numbers) > 12 else 0
+                        # Ищем все числа в строке
+                        numbers = re.findall(r'[\d]+[.,]?\d*', row_text)
+                        
+                        # Преобразуем строки в числа (заменяем запятые на точки)
+                        numbers = [float(num.replace(',', '.').replace(' ', '')) for num in numbers if num]
+                        
+                        if len(numbers) >= 13:  # Должно быть минимум 13 чисел
+                            # Определяем индексы на основе структуры
+                            # Температура обычно после клейма и размеров
+                            # В вашем формате: после клейма идут: длина(15), диаметр(2.97), площадь(6.93), температура(20)
+                            # Значит температура - 4-е число (индекс 3)
+                            temperature = int(numbers[3]) if len(numbers) > 3 else 20
                             
-                            all_data.append({
-                                'Клеймо': sample_mark,
-                                'Температура': temperature,
-                                'Предел прочности': strength,
-                                'Предел текучести': yield_strength,
-                                'Отн. удл.': elongation,
-                                'Отн. суж.': reduction
-                            })
-                    except Exception as e:
-                        continue
-    
-    return pd.DataFrame(all_data)
-
-def parse_simple_text(text):
-    """Парсинг текстового представления таблицы"""
-    data_rows = []
-    
-    # Разбиваем текст на строки
-    lines = text.split('\n')
-    
-    for line in lines:
-        # Ищем строки с клеймом образца
-        if re.search(r'\d+-\d+', line):
-            # Убираем лишние пробелы
-            line_clean = re.sub(r'\s+', ' ', line.strip())
-            parts = line_clean.split()
-            
-            for i, part in enumerate(parts):
-                if re.match(r'^\d+-\d+$', part):
-                    try:
-                        sample_mark = part
-                        # Пытаемся извлечь числа после клейма
-                        numbers = []
-                        for item in parts[i+1:]:
-                            # Убираем нечисловые символы
-                            num_str = re.sub(r'[^\d.,-]', '', item)
-                            num_str = num_str.replace(',', '.')
-                            if num_str and re.match(r'^-?\d*\.?\d+$', num_str):
-                                try:
-                                    if '.' in num_str:
-                                        numbers.append(float(num_str))
-                                    else:
-                                        numbers.append(int(num_str))
-                                except:
-                                    continue
-                        
-                        if len(numbers) >= 10:
-                            temperature = int(numbers[5]) if len(numbers) > 5 else 20
-                            strength = numbers[10] if len(numbers) > 10 else 0
-                            yield_strength = numbers[11] if len(numbers) > 11 else 0
-                            elongation = numbers[13] if len(numbers) > 13 else 0
-                            reduction = numbers[12] if len(numbers) > 12 else 0
+                            # Предел прочности и текучести находятся дальше
+                            # В вашем формате: предел прочности - 10-е число (индекс 9), предел текучести - 11-е (индекс 10)
+                            strength = numbers[9] if len(numbers) > 9 else 0
+                            yield_strength = numbers[10] if len(numbers) > 10 else 0
+                            
+                            # Относительное сужение и удлинение - последние два числа
+                            reduction = numbers[11] if len(numbers) > 11 else 0
+                            elongation = numbers[12] if len(numbers) > 12 else 0
                             
                             data_rows.append({
                                 'Клеймо': sample_mark,
@@ -202,8 +139,57 @@ def parse_simple_text(text):
                                 'Отн. удл.': elongation,
                                 'Отн. суж.': reduction
                             })
-                    except:
+                            
+                    except Exception as e:
                         continue
+    
+    # Если не нашли данных в таблицах, пробуем парсить текст
+    if not data_rows:
+        return parse_protocol_from_text('\n'.join([p.text for p in doc.paragraphs]))
+    
+    return pd.DataFrame(data_rows)
+
+def parse_protocol_from_text(text):
+    """Парсинг данных из текста протокола"""
+    lines = text.split('\n')
+    data_rows = []
+    
+    for line in lines:
+        # Ищем строки с клеймом образца
+        if re.search(r'\d+-\d+', line):
+            # Убираем лишние пробелы
+            line_clean = re.sub(r'\s+', ' ', line.strip())
+            
+            # Ищем все числа в строке
+            numbers = re.findall(r'[\d]+[.,]?\d*', line_clean)
+            
+            if len(numbers) >= 13:
+                try:
+                    # Находим клеймо
+                    klem_match = re.search(r'(\d+-\d+)', line_clean)
+                    sample_mark = klem_match.group(1) if klem_match else ""
+                    
+                    # Преобразуем числа
+                    nums = [float(num.replace(',', '.').replace(' ', '')) for num in numbers]
+                    
+                    # Определяем данные (аналогично табличному парсеру)
+                    temperature = int(nums[3]) if len(nums) > 3 else 20
+                    strength = nums[9] if len(nums) > 9 else 0
+                    yield_strength = nums[10] if len(nums) > 10 else 0
+                    reduction = nums[11] if len(nums) > 11 else 0
+                    elongation = nums[12] if len(nums) > 12 else 0
+                    
+                    data_rows.append({
+                        'Клеймо': sample_mark,
+                        'Температура': temperature,
+                        'Предел прочности': strength,
+                        'Предел текучести': yield_strength,
+                        'Отн. удл.': elongation,
+                        'Отн. суж.': reduction
+                    })
+                    
+                except Exception as e:
+                    continue
     
     return pd.DataFrame(data_rows)
 
@@ -469,9 +455,9 @@ def main():
     
     # Загрузка файла
     uploaded_file = st.file_uploader(
-        "Выберите файл с протоколом испытаний (DOCX или TXT)",
-        type=['docx', 'txt'],
-        help="Загрузите файл в формате .docx или .txt с таблицей результатов испытаний"
+        "Выберите файл с протоколом испытаний (DOCX)",
+        type=['docx'],
+        help="Загрузите файл в формате .docx с таблицей результатов испытаний"
     )
     
     # Боковая панель
@@ -480,7 +466,7 @@ def main():
         st.markdown("---")
         
         st.subheader("Параметры обработки")
-        use_test_data = st.checkbox("Использовать тестовые данные", value=False,
+        use_test_data = st.checkbox("Использовать тестовые данные", value=True,
                                    help="Использовать примерные данные для демонстрации")
         
         st.subheader("Нормативные значения")
@@ -504,22 +490,9 @@ def main():
                     df = get_test_data()
                     file_source = "тестовые данные"
                 else:
-                    # Определяем тип файла
-                    if uploaded_file.name.endswith('.docx'):
-                        file_content = uploaded_file.read()
-                        df = parse_docx_table(file_content)
-                        
-                        # Если не удалось распарсить, пробуем текстовый метод
-                        if df.empty:
-                            uploaded_file.seek(0)
-                            doc = Document(BytesIO(file_content))
-                            text = '\n'.join([p.text for p in doc.paragraphs])
-                            df = parse_simple_text(text)
-                    else:
-                        # TXT файл
-                        text = uploaded_file.getvalue().decode('utf-8', errors='ignore')
-                        df = parse_simple_text(text)
-                    
+                    # Парсим загруженный файл
+                    file_content = uploaded_file.read()
+                    df = parse_protocol_from_docx(file_content)
                     file_source = uploaded_file.name
                 
                 if df.empty:
@@ -532,12 +505,6 @@ def main():
                     3. Убедиться, что данные содержат клейма в формате "X-Y"
                     """)
                     return
-                
-                # Округляем все числовые значения
-                numeric_cols = ['Предел прочности', 'Предел текучести', 'Отн. удл.', 'Отн. суж.']
-                for col in numeric_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
                 
                 # Создаем таблицы
                 detailed_df = create_detailed_dataframe(df)
@@ -552,7 +519,6 @@ def main():
                     st.metric("Количество труб", unique_pipes)
                 with col3:
                     temps = sorted(df['Температура'].unique())
-                    temp_display = ', '.join(map(str, temps))
                     st.metric("Температуры испытаний", f"{len(temps)} видов")
                 
                 # Предпросмотр

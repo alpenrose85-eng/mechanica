@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from io import BytesIO
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 
@@ -30,13 +30,6 @@ st.markdown("""
         padding: 1rem;
         border-radius: 10px;
         border-left: 5px solid #1E3A8A;
-        margin: 1rem 0;
-    }
-    .warning-box {
-        background-color: #fff3cd;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 5px solid #ffc107;
         margin: 1rem 0;
     }
 </style>
@@ -126,17 +119,16 @@ def get_interpolated_yield(steel_grade, temp):
 def check_against_normative(value, temp, param, steel_grade, is_high_temp=False):
     """Проверка значения на соответствие нормативу"""
     if steel_grade not in STEEL_GRADES:
-        return True  # Если марка стали не определена, считаем что соответствует
+        return True
     
     steel_data = STEEL_GRADES[steel_grade]
     
     try:
         num_value = float(value)
     except:
-        return True  # Если не число, пропускаем проверку
+        return True
     
     if temp <= 20 or not is_high_temp:
-        # Проверка для комнатной температуры
         if param == 'strength':
             min_val, max_val = steel_data['room_temp']['strength_range']
             return min_val <= num_value <= max_val
@@ -150,11 +142,9 @@ def check_against_normative(value, temp, param, steel_grade, is_high_temp=False)
             min_val = steel_data['room_temp']['reduction_min']
             return num_value >= min_val
     else:
-        # Проверка для повышенной температуры
         if param == 'yield':
             normative_value = get_interpolated_yield(steel_grade, temp)
             return num_value >= normative_value
-        # Для других параметров при повышенной температуре нормативы не заданы
         return True
     
     return True
@@ -164,13 +154,8 @@ def clean_number(text):
     if not text:
         return 0
     
-    # Убираем пробелы в числах (например, "3 363" -> "3363")
     text = str(text).replace(' ', '')
-    
-    # Заменяем запятые на точки для десятичных чисел
     text = text.replace(',', '.')
-    
-    # Убираем все нечисловые символы, кроме точки и цифр
     text = re.sub(r'[^\d.]', '', text)
     
     try:
@@ -188,32 +173,25 @@ def parse_protocol_from_docx(file_content):
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells]
             
-            # Ищем строку с клеймом образца
             for i, cell_text in enumerate(cells):
                 if re.match(r'^\d+-\d+$', cell_text):
                     try:
                         sample_mark = cell_text
                         
-                        # Извлекаем данные из строки
                         if len(cells) >= 14:
-                            # Температура - 5-я колонка (индекс 5 в 0-based)
                             temp_text = cells[5]
                             temp_match = re.search(r'(\d+)', temp_text)
                             temperature = int(temp_match.group(1)) if temp_match else 20
                             
-                            # Предел прочности - 10-я колонка (индекс 10)
                             strength_text = cells[10]
                             strength = clean_number(strength_text)
                             
-                            # Предел текучести - 11-я колонка (индекс 11)
                             yield_text = cells[11]
                             yield_strength = clean_number(yield_text)
                             
-                            # Относительное сужение - 12-я колонка (индекс 12)
                             reduction_text = cells[12]
                             reduction = clean_number(reduction_text)
                             
-                            # Относительное удлинение - 13-я колонка (индекс 13)
                             elongation_text = cells[13]
                             elongation = clean_number(elongation_text)
                             
@@ -226,10 +204,9 @@ def parse_protocol_from_docx(file_content):
                                 'Отн. суж.': reduction
                             })
                             
-                    except Exception as e:
+                    except:
                         continue
     
-    # Если не нашли данные в таблицах, пробуем парсить текст
     if not data_rows:
         return parse_protocol_from_text('\n'.join([p.text for p in doc.paragraphs]))
     
@@ -241,43 +218,26 @@ def parse_protocol_from_text(text):
     data_rows = []
     
     for line in lines:
-        # Ищем строки с клеймом образца
         if re.search(r'\d+-\d+', line) and any(x in line for x in ['МПа', '485', '297', '57', '30']):
-            # Убираем лишние пробелы
             line_clean = re.sub(r'\s+', ' ', line.strip())
-            
-            # Разбиваем строку на части
             parts = line_clean.split()
             
-            # Ищем клеймо
             for i, part in enumerate(parts):
                 if re.match(r'^\d+-\d+$', part):
                     try:
                         sample_mark = part
                         
-                        # Ищем числовые значения после клейма
                         numbers = []
                         for j in range(i+1, len(parts)):
-                            # Очищаем каждое значение
                             cleaned = clean_number(parts[j])
                             if cleaned != 0:
                                 numbers.append(cleaned)
                         
-                        # В таблице должно быть минимум 12 чисел после клейма
                         if len(numbers) >= 12:
-                            # Температура - 3-е число после клейма
                             temperature = int(numbers[2]) if len(numbers) > 2 else 20
-                            
-                            # Предел прочности - 8-е число после клейма
                             strength = numbers[7] if len(numbers) > 7 else 0
-                            
-                            # Предел текучести - 9-е число после клейма
                             yield_strength = numbers[8] if len(numbers) > 8 else 0
-                            
-                            # Относительное сужение - 10-е число после клейма
                             reduction = numbers[9] if len(numbers) > 9 else 0
-                            
-                            # Относительное удлинение - 11-е число после клейма
                             elongation = numbers[10] if len(numbers) > 10 else 0
                             
                             data_rows.append({
@@ -289,7 +249,7 @@ def parse_protocol_from_text(text):
                                 'Отн. суж.': reduction
                             })
                             
-                    except Exception as e:
+                    except:
                         continue
     
     return pd.DataFrame(data_rows)
@@ -303,8 +263,6 @@ def parse_mapping_file(mapping_file):
             return {}
         
         mapping = {}
-        
-        # Создаем список для сохранения порядка строк
         rows = []
         
         for idx, row in df_mapping.iterrows():
@@ -312,7 +270,6 @@ def parse_mapping_file(mapping_file):
                 new_name = str(row[0]).strip()
                 lab_number = str(row[1]).strip()
                 
-                # Извлекаем числовую часть из лабораторного номера
                 try:
                     numbers = re.findall(r'\d+', lab_number)
                     if numbers:
@@ -325,10 +282,8 @@ def parse_mapping_file(mapping_file):
                 except ValueError:
                     continue
         
-        # Сортируем строки по индексу в порядке возрастания (сверху вниз)
         rows.sort(key=lambda x: x['index'])
         
-        # Присваиваем порядок от 1 до N (сохраняя порядок из файла)
         for order, row in enumerate(rows, 1):
             mapping[row['pipe_num']] = {
                 'new_name': row['new_name'],
@@ -386,7 +341,6 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
     
     # Определяем порядок следования образцов
     if mapping:
-        # Создаем список номеров труб в порядке из mapping
         sorted_pipes = []
         other_pipes = []
         
@@ -396,27 +350,15 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
             else:
                 other_pipes.append(pipe_num)
         
-        # Сортируем по порядку из mapping
         sorted_pipes.sort(key=lambda x: mapping[x]['order'])
-        # Сортируем остальные по возрастанию
         other_pipes.sort()
-        
-        # Объединяем списки
         ordered_pipes = sorted_pipes + other_pipes
         
-        # Создаем столбец с порядком для сортировки
-        def get_order(pipe_num):
-            if pipe_num in mapping:
-                return mapping[pipe_num]['order']
-            else:
-                return 999 + pipe_num
-        
-        df['Порядок'] = df['Номер трубы'].apply(get_order)
+        df['Порядок'] = df['Номер трубы'].apply(
+            lambda x: mapping.get(x, {}).get('order', 999 + x))
         df['Новое название'] = df['Номер трубы'].apply(
-            lambda x: mapping.get(x, {}).get('new_name', f"Труба {x}")
-        )
+            lambda x: mapping.get(x, {}).get('new_name', f"Труба {x}"))
         
-        # Сортируем по порядку, затем по температуре, затем по номеру образца
         df = df.sort_values(['Порядок', 'Температура', 'Номер образца'])
     else:
         df['Новое название'] = df['Номер трубы'].apply(lambda x: f"Труба {x}")
@@ -424,20 +366,22 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
         ordered_pipes = sorted(df['Номер трубы'].unique())
     
     detailed_rows = []
-    # Для хранения информации о несоответствиях (индекс строки, индекс колонки)
     non_conformities = []
     
-    row_index = 0
+    # Храним границы образцов для объединения ячеек в Word
+    sample_boundaries = []
     
     # Проходим по трубам в нужном порядке
     for pipe_num in ordered_pipes:
         pipe_data = df[df['Номер трубы'] == pipe_num]
         
-        # Определяем название образца
         if mapping and pipe_num in mapping:
             pipe_name = mapping[pipe_num]['new_name']
         else:
             pipe_name = f"Труба {pipe_num}"
+        
+        # Запоминаем начало образца
+        start_index = len(detailed_rows)
         
         # Группируем по температуре
         for temp in sorted(pipe_data['Температура'].unique()):
@@ -447,7 +391,6 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
             for _, row in temp_data.iterrows():
                 row_data = {
                     'Образец': pipe_name,
-                    'Клеймо образца (лаборатория)': row['Клеймо'],
                     'Температура, °C': temp,
                     'Предел прочности, МПа': int(round(row['Предел прочности'])),
                     'Предел текучести, МПа': int(round(row['Предел текучести'])),
@@ -459,26 +402,23 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
                 # Проверяем на соответствие нормативам
                 row_index = len(detailed_rows) - 1
                 if temp <= 20:
-                    # Проверяем все параметры для комнатной температуры
                     if not check_against_normative(row_data['Предел прочности, МПа'], temp, 'strength', steel_grade):
-                        non_conformities.append((row_index, 3))  # Колонка 3 - предел прочности
+                        non_conformities.append((row_index, 2))
                     if not check_against_normative(row_data['Предел текучести, МПа'], temp, 'yield', steel_grade):
-                        non_conformities.append((row_index, 4))  # Колонка 4 - предел текучести
+                        non_conformities.append((row_index, 3))
                     if not check_against_normative(row_data['Отн. удл., %'], temp, 'elongation', steel_grade):
-                        non_conformities.append((row_index, 5))  # Колонка 5 - относительное удлинение
+                        non_conformities.append((row_index, 4))
                     if not check_against_normative(row_data['Отн. суж., %'], temp, 'reduction', steel_grade):
-                        non_conformities.append((row_index, 6))  # Колонка 6 - относительное сужение
+                        non_conformities.append((row_index, 5))
                 else:
-                    # Для повышенной температуры проверяем только предел текучести
                     if not check_against_normative(row_data['Предел текучести, МПа'], temp, 'yield', steel_grade, is_high_temp=True):
-                        non_conformities.append((row_index, 4))  # Колонка 4 - предел текучести
+                        non_conformities.append((row_index, 3))
             
-            # Добавляем строку со средними значениями
+            # Добавляем строку со средними значениями (Среднее в столбце температуры)
             if len(temp_data) > 0:
                 avg_row = {
                     'Образец': pipe_name,
-                    'Клеймо образца (лаборатория)': 'Среднее',
-                    'Температура, °C': temp,
+                    'Температура, °C': 'Среднее',
                     'Предел прочности, МПа': int(round(temp_data['Предел прочности'].mean())),
                     'Предел текучести, МПа': int(round(temp_data['Предел текучести'].mean())),
                     'Отн. удл., %': int(round(temp_data['Отн. удл.'].mean())),
@@ -490,42 +430,31 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
                 row_index = len(detailed_rows) - 1
                 if temp <= 20:
                     if not check_against_normative(avg_row['Предел прочности, МПа'], temp, 'strength', steel_grade):
-                        non_conformities.append((row_index, 3))
+                        non_conformities.append((row_index, 2))
                     if not check_against_normative(avg_row['Предел текучести, МПа'], temp, 'yield', steel_grade):
-                        non_conformities.append((row_index, 4))
+                        non_conformities.append((row_index, 3))
                     if not check_against_normative(avg_row['Отн. удл., %'], temp, 'elongation', steel_grade):
-                        non_conformities.append((row_index, 5))
+                        non_conformities.append((row_index, 4))
                     if not check_against_normative(avg_row['Отн. суж., %'], temp, 'reduction', steel_grade):
-                        non_conformities.append((row_index, 6))
+                        non_conformities.append((row_index, 5))
                 else:
                     if not check_against_normative(avg_row['Предел текучести, МПа'], temp, 'yield', steel_grade, is_high_temp=True):
-                        non_conformities.append((row_index, 4))
+                        non_conformities.append((row_index, 3))
         
-        # Добавляем пустую строку между образцами
-        detailed_rows.append({
-            'Образец': '',
-            'Клеймо образца (лаборатория)': '',
-            'Температура, °C': '',
-            'Предел прочности, МПа': '',
-            'Предел текучести, МПа': '',
-            'Отн. удл., %': '',
-            'Отн. суж., %': ''
-        })
-        row_index += 1
+        # Запоминаем конец образца
+        end_index = len(detailed_rows) - 1
+        sample_boundaries.append((start_index, end_index, pipe_name))
     
-    # Удаляем последнюю пустую строку
+    # Удаляем последнюю пустую строку если есть
     if detailed_rows and all(v == '' for v in detailed_rows[-1].values()):
         detailed_rows.pop()
-        row_index -= 1
     
     # Добавляем нормативные значения
     steel_data = STEEL_GRADES.get(steel_grade, STEEL_GRADES['20'])
     
-    # Нормативные значения для комнатной температуры
-    normative_start_index = len(detailed_rows)
+    normative_start = len(detailed_rows)
     detailed_rows.append({
         'Образец': f'Требования для {steel_data["name"]}',
-        'Клеймо образца (лаборатория)': '',
         'Температура, °C': 20,
         'Предел прочности, МПа': f'{steel_data["room_temp"]["strength_range"][0]}-{steel_data["room_temp"]["strength_range"][1]}',
         'Предел текучести, МПа': f'не менее {steel_data["room_temp"]["yield_min"]}',
@@ -533,7 +462,7 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
         'Отн. суж., %': f'не менее {steel_data["room_temp"]["reduction_min"]}'
     })
     
-    # Добавляем нормативные значения для повышенных температур, которые есть в данных
+    # Добавляем нормативные значения для повышенных температур
     unique_temps = sorted([t for t in df['Температура'].unique() if t > 20])
     
     for temp in unique_temps:
@@ -541,7 +470,6 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
         
         detailed_rows.append({
             'Образец': f'Требования для {steel_data["name"]}',
-            'Клеймо образца (лаборатория)': '',
             'Температура, °C': temp,
             'Предел прочности, МПа': '-',
             'Предел текучести, МПа': f'не менее {normative_yield}',
@@ -550,10 +478,10 @@ def create_detailed_dataframe(df, mapping=None, steel_grade='20'):
         })
     
     detailed_df = pd.DataFrame(detailed_rows)
-    return detailed_df, non_conformities
+    return detailed_df, non_conformities, sample_boundaries
 
 def create_summary_table(df, mapping=None, steel_grade='20'):
-    """Создание сводной таблицы"""
+    """Создание сводной таблицы со средними пределами текучести при повышенной температуре"""
     if df.empty:
         return pd.DataFrame(), []
     
@@ -583,7 +511,7 @@ def create_summary_table(df, mapping=None, steel_grade='20'):
                     'Средний предел текучести, МПа': avg_yield
                 })
         
-        # Сортируем по порядку
+        # Сортируем по порядку (такому же как в основной таблице)
         summary_df = pd.DataFrame(summary_rows)
         if not summary_df.empty:
             summary_df = summary_df.sort_values('Порядок').drop('Порядок', axis=1)
@@ -606,7 +534,7 @@ def create_summary_table(df, mapping=None, steel_grade='20'):
     temperatures_above_20 = sorted([t for t in df['Температура'].unique() if t > 20])
     return summary_df, temperatures_above_20
 
-def create_word_report(detailed_df, summary_df, high_temps, non_conformities, steel_grade='20'):
+def create_word_report(detailed_df, summary_df, high_temps, non_conformities, sample_boundaries, steel_grade='20'):
     """Создание Word документа с таблицами"""
     doc = Document()
     
@@ -640,6 +568,13 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, st
     
     # Создаем таблицу
     if not detailed_df.empty:
+        # Определяем, где начинаются нормативные значения (после всех образцов)
+        normative_start = None
+        for i, row in detailed_df.iterrows():
+            if 'Требования' in str(row['Образец']):
+                normative_start = i
+                break
+        
         table1 = doc.add_table(rows=len(detailed_df)+1, cols=len(detailed_df.columns))
         table1.style = 'Table Grid'
         table1.autofit = False
@@ -666,11 +601,24 @@ def create_word_report(detailed_df, summary_df, high_temps, non_conformities, st
                 if 'Среднее' in value or 'Требования' in str(row.get('Образец', '')):
                     cell.paragraphs[0].runs[0].font.bold = True
                 
-                # Выделение красным для несоответствий
-                if (i, j) in non_conformities:
+                # Выделение красным для несоответствий (только для строк с образцами, не для нормативных)
+                if (i, j) in non_conformities and (normative_start is None or i < normative_start):
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
-                            run.font.color.rgb = RGBColor(255, 0, 0)  # Красный цвет
+                            run.font.color.rgb = RGBColor(255, 0, 0)
+        
+        # Объединение ячеек для названий образцов
+        for start_idx, end_idx, pipe_name in sample_boundaries:
+            if start_idx <= end_idx:
+                # Объединяем ячейки в первом столбце от start_idx+1 до end_idx+1
+                # (+1 потому что первая строка - заголовки)
+                start_cell = table1.cell(start_idx + 1, 0)
+                end_cell = table1.cell(end_idx + 1, 0)
+                start_cell.merge(end_cell)
+                
+                # Центрируем текст по вертикали и горизонтали
+                start_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                start_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
     
     doc.add_page_break()
     
@@ -762,7 +710,6 @@ def main():
             index=0
         )
         
-        # Показываем информацию о выбранной марке стали
         steel_info = STEEL_GRADES[steel_grade]
         with st.expander(f"📋 Нормативные значения для {steel_info['name']}"):
             st.write(f"**Описание:** {steel_info['description']}")
@@ -776,10 +723,6 @@ def main():
                 st.write("**При повышенных температурах:**")
                 for temp, value in sorted(steel_info['high_temp_points']):
                     st.write(f"- {temp}°C: предел текучести не менее {value} МПа")
-            
-            st.write("**Примечание:**")
-            st.write("- Значения, не соответствующие нормативам, выделяются красным цветом")
-            st.write("- Для промежуточных температур используется линейная интерполяция")
     
     # Обработка файлов
     if uploaded_protocol is not None or use_test_data:
@@ -807,7 +750,7 @@ def main():
                     return
                 
                 # Создаем таблицы
-                detailed_df, non_conformities = create_detailed_dataframe(df, mapping, steel_grade)
+                detailed_df, non_conformities, sample_boundaries = create_detailed_dataframe(df, mapping, steel_grade)
                 summary_df, high_temps = create_summary_table(df, mapping, steel_grade)
                 
                 # Показываем статистику
@@ -823,74 +766,35 @@ def main():
                 
                 # Показываем информацию о несоответствиях
                 if non_conformities:
-                    st.markdown(f"""
-                    <div class="warning-box">
-                    <h4>⚠️ Найдены несоответствия нормативным значениям</h4>
-                    <p>Обнаружено <strong>{len(non_conformities)} значений</strong>, не соответствующих нормативам для {STEEL_GRADES[steel_grade]['name']}.</p>
-                    <p>В таблице Word эти значения будут выделены <span style="color: red;">красным цветом</span>.</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Показываем детали несоответствий
-                    with st.expander("📋 Детали несоответствий"):
-                        st.write("**Несоответствующие нормативу значения:**")
-                        for row_idx, col_idx in non_conformities:
-                            row = detailed_df.iloc[row_idx]
-                            if row_idx < len(detailed_df):
-                                col_names = ['Образец', 'Клеймо', 'Температура', 'Предел прочности', 'Предел текучести', 'Отн. удл.', 'Отн. суж.']
-                                param_name = col_names[col_idx] if col_idx < len(col_names) else f"Колонка {col_idx}"
-                                st.write(f"- {row['Образец']} ({row['Клеймо образца (лаборатория)']}), {row['Температура, °C']}°C: {param_name} = {row.iloc[col_idx]}")
+                    st.warning(f"⚠️ Найдены {len(non_conformities)} значений, не соответствующих нормативам")
                 
                 # Предпросмотр
                 st.subheader("📋 Предпросмотр основной таблицы")
                 st.dataframe(detailed_df, use_container_width=True, hide_index=True)
                 
-                # Показываем интерполяционные расчеты
-                with st.expander("📊 Расчет нормативных значений"):
-                    st.write(f"**Интерполяция предела текучести для {STEEL_GRADES[steel_grade]['name']}:**")
-                    
-                    high_temps_unique = sorted([t for t in df['Температура'].unique() if t > 20])
-                    
-                    if high_temps_unique:
-                        st.write("| Температура, °C | Нормативный предел текучести, МПа | Примечание |")
-                        st.write("|-----------------|-----------------------------------|------------|")
-                        
-                        for temp in high_temps_unique:
-                            normative_value = get_interpolated_yield(steel_grade, temp)
-                            
-                            # Определяем ближайшие точки
-                            steel_info = STEEL_GRADES[steel_grade]
-                            points = steel_info['high_temp_points']
-                            sorted_points = sorted(points)
-                            
-                            if temp <= sorted_points[0][0]:
-                                interval = f"20°C - {sorted_points[0][0]}°C"
-                                points_desc = f"{steel_info['room_temp']['yield_min']} МПа - {sorted_points[0][1]} МПа"
-                            elif temp >= sorted_points[-1][0]:
-                                interval = f"{sorted_points[-1][0]}°C и выше"
-                                points_desc = f"{sorted_points[-1][1]} МПа"
-                            else:
-                                # Находим интервал
-                                for i in range(len(sorted_points) - 1):
-                                    t1, y1 = sorted_points[i]
-                                    t2, y2 = sorted_points[i + 1]
-                                    if t1 <= temp <= t2:
-                                        interval = f"{t1}°C - {t2}°C"
-                                        points_desc = f"{y1} МПа - {y2} МПа"
-                                        break
-                            
-                            st.write(f"| {temp} | {normative_value} | Интерполяция на интервале {interval} ({points_desc}) |")
-                    else:
-                        st.write("Нет данных для повышенных температур")
+                # Показываем информацию о структуре таблицы в Word
+                with st.expander("📝 Структура Word отчета"):
+                    st.write("**Особенности форматирования в Word:**")
+                    st.write("1. Название образца объединено в одну ячейку для всех его строк")
+                    st.write("2. Убраны лабораторные клейма образцов")
+                    st.write("3. В столбце температуры для средних значений указано 'Среднее'")
+                    st.write("4. Несоответствующие значения выделены красным цветом")
+                    st.write("5. Нормативные значения добавлены в конец таблицы")
                 
                 if not summary_df.empty:
                     st.subheader("📊 Предпросмотр сводной таблицы")
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                    
+                    # Показываем порядок образцов в сводной таблице
+                    with st.expander("📋 Порядок образцов в сводной таблице"):
+                        st.write("Образцы отсортированы в том же порядке, что и в основной таблице:")
+                        for i, row in summary_df.iterrows():
+                            st.write(f"{i+1}. {row['Образец']}: {row['Средний предел текучести, МПа']} МПа")
                 
                 # Создание Word документа
                 st.subheader("📥 Скачать отчет")
                 
-                doc_bytes = create_word_report(detailed_df, summary_df, high_temps, non_conformities, steel_grade)
+                doc_bytes = create_word_report(detailed_df, summary_df, high_temps, non_conformities, sample_boundaries, steel_grade)
                 
                 # Кнопка скачивания
                 filename = f"Таблица_механических_свойств_{steel_grade}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
@@ -899,8 +803,7 @@ def main():
                     label=f"⬇️ Скачать отчет в Word ({STEEL_GRADES[steel_grade]['name']})",
                     data=doc_bytes,
                     file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    help="Файл содержит две таблицы с выделением несоответствующих значений красным цветом"
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 
         except Exception as e:
@@ -909,23 +812,6 @@ def main():
     else:
         # Инструкция
         st.info("👈 Загрузите протокол испытаний (DOCX файл) для начала обработки")
-        
-        # Показываем информацию о марках стали
-        with st.expander("📋 Поддерживаемые марки стали"):
-            for grade, info in STEEL_GRADES.items():
-                st.write(f"**{info['name']}** ({grade})")
-                st.write(f"*{info['description']}*")
-                st.write(f"- Предел прочности при 20°C: {info['room_temp']['strength_range'][0]}-{info['room_temp']['strength_range'][1]} МПа")
-                st.write(f"- Предел текучести при 20°C: не менее {info['room_temp']['yield_min']} МПа")
-                st.write(f"- Относительное удлинение: не менее {info['room_temp']['elongation_min']}%")
-                st.write(f"- Относительное сужение: не менее {info['room_temp']['reduction_min']}%")
-                
-                if info['high_temp_points']:
-                    st.write("- Предел текучести при повышенных температурах:")
-                    for temp, value in sorted(info['high_temp_points']):
-                        st.write(f"  - {temp}°C: не менее {value} МПа")
-                
-                st.write("---")
 
 if __name__ == "__main__":
     main()

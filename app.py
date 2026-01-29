@@ -170,89 +170,243 @@ def parse_protocol_from_docx(file_content):
     data_rows = []
     
     for table in doc.tables:
-        for row in table.rows:
+        # Определяем индексы столбцов по заголовкам
+        headers_found = False
+        column_indices = {}
+        
+        # Сначала ищем строку с заголовками
+        for row_idx, row in enumerate(table.rows):
             cells = [cell.text.strip() for cell in row.cells]
             
-            for i, cell_text in enumerate(cells):
-                if re.match(r'^\d+-\d+$', cell_text):
-                    try:
-                        sample_mark = cell_text
+            # Проверяем, содержит ли строка заголовки
+            header_indicators = ['Клеймо', 'σв', 'σ0.2', 'Ψ', 'ε', 'Температура', 'Т ºC']
+            if any(indicator in ' '.join(cells) for indicator in header_indicators):
+                # Нашли заголовки
+                for col_idx, cell_text in enumerate(cells):
+                    cell_text_lower = cell_text.lower()
+                    if 'клеймо' in cell_text_lower or cell_text in ['1-1', '2-1']:  # Может быть номер уже
+                        column_indices['sample_mark'] = col_idx
+                    elif 'температура' in cell_text_lower or 'т' in cell_text_lower or 'ºc' in cell_text_lower:
+                        column_indices['temperature'] = col_idx
+                    elif 'σв' in cell_text or 'прочности' in cell_text_lower or '485' in cell_text:  # Пример значения
+                        column_indices['strength'] = col_idx
+                    elif 'σ0.2' in cell_text or 'текучести' in cell_text_lower or '297' in cell_text:  # Пример значения
+                        column_indices['yield'] = col_idx
+                    elif 'ψ' in cell_text or 'сужение' in cell_text_lower or '57' in cell_text:  # Пример значения
+                        column_indices['reduction'] = col_idx
+                    elif 'ε' in cell_text or 'удлинение' in cell_text_lower or '30' in cell_text:  # Пример значения
+                        column_indices['elongation'] = col_idx
+                
+                headers_found = True
+                continue
+            
+            # Если заголовки найдены, парсим данные
+            if headers_found:
+                try:
+                    sample_mark = ''
+                    temperature = 20
+                    strength = 0
+                    yield_strength = 0
+                    reduction = 0
+                    elongation = 0
+                    
+                    # Ищем клеймо в формате "1-1", "2-1" и т.д.
+                    for col_idx, cell_text in enumerate(cells):
+                        if re.match(r'^\d+-\d+$', cell_text.strip()):
+                            sample_mark = cell_text.strip()
+                            break
+                    
+                    # Если клеймо не найдено, проверяем все ячейки
+                    if not sample_mark:
+                        for cell_text in cells:
+                            if re.match(r'^\d+-\d+$', cell_text.strip()):
+                                sample_mark = cell_text.strip()
+                                break
+                    
+                    if not sample_mark:
+                        continue  # Пропускаем строки без клейма
+                    
+                    # Парсим остальные значения по индексам или поиском
+                    for col_idx, cell_text in enumerate(cells):
+                        cell_text = cell_text.strip()
                         
-                        if len(cells) >= 14:
-                            temp_text = cells[5]
-                            temp_match = re.search(r'(\d+)', temp_text)
-                            temperature = int(temp_match.group(1)) if temp_match else 20
-                            
-                            strength_text = cells[10]
-                            strength = clean_number(strength_text)
-                            
-                            yield_text = cells[11]
-                            yield_strength = clean_number(yield_text)
-                            
-                            reduction_text = cells[12]
-                            reduction = clean_number(reduction_text)
-                            
-                            elongation_text = cells[13]
-                            elongation = clean_number(elongation_text)
-                            
-                            data_rows.append({
-                                'Клеймо': sample_mark,
-                                'Температура': temperature,
-                                'Предел прочности': strength,
-                                'Предел текучести': yield_strength,
-                                'Отн. удл.': elongation,
-                                'Отн. суж.': reduction
-                            })
-                            
-                    except:
-                        continue
+                        # Температура
+                        if col_idx == column_indices.get('temperature'):
+                            temp_match = re.search(r'(\d+)', cell_text)
+                            if temp_match:
+                                temperature = int(temp_match.group(1))
+                        elif 'temperature' not in column_indices:
+                            # Попробуем определить по значению
+                            if cell_text in ['20', '403', '450']:
+                                temperature = int(cell_text)
+                        
+                        # Предел прочности
+                        if col_idx == column_indices.get('strength'):
+                            strength = clean_number(cell_text)
+                        elif 'strength' not in column_indices:
+                            # Проверяем, является ли значение пределом прочности (типичные значения 400-600)
+                            num_val = clean_number(cell_text)
+                            if 400 <= num_val <= 600:
+                                strength = num_val
+                        
+                        # Предел текучести
+                        if col_idx == column_indices.get('yield'):
+                            yield_strength = clean_number(cell_text)
+                        elif 'yield' not in column_indices:
+                            # Проверяем, является ли значение пределом текучести (типичные значения 200-400)
+                            num_val = clean_number(cell_text)
+                            if 200 <= num_val <= 400 and strength == 0:
+                                yield_strength = num_val
+                        
+                        # Относительное сужение
+                        if col_idx == column_indices.get('reduction'):
+                            reduction = clean_number(cell_text)
+                        elif 'reduction' not in column_indices:
+                            # Проверяем, является ли значением сужения (типичные значения 50-70)
+                            num_val = clean_number(cell_text)
+                            if 50 <= num_val <= 70:
+                                reduction = num_val
+                        
+                        # Относительное удлинение
+                        if col_idx == column_indices.get('elongation'):
+                            elongation = clean_number(cell_text)
+                        elif 'elongation' not in column_indices:
+                            # Проверяем, является ли значением удлинения (типичные значения 20-40)
+                            num_val = clean_number(cell_text)
+                            if 20 <= num_val <= 40:
+                                elongation = num_val
+                    
+                    # Если какие-то значения не найдены, попробуем найти все числа в строке
+                    if strength == 0 or yield_strength == 0 or reduction == 0 or elongation == 0:
+                        all_numbers = []
+                        for cell_text in cells:
+                            nums = re.findall(r'\d+[.,]?\d*', cell_text)
+                            all_numbers.extend([clean_number(num) for num in nums])
+                        
+                        # Фильтруем корректные значения
+                        valid_numbers = [n for n in all_numbers if n > 0]
+                        
+                        if len(valid_numbers) >= 4:
+                            # Первое число > 400 обычно предел прочности
+                            strength = next((n for n in valid_numbers if 400 <= n <= 600), strength)
+                            # Второе число > 200 обычно предел текучести
+                            yield_strength = next((n for n in valid_numbers if 200 <= n <= 400 and n != strength), yield_strength)
+                            # Числа 20-40 обычно удлинение
+                            elongation = next((n for n in valid_numbers if 20 <= n <= 40), elongation)
+                            # Числа 50-70 обычно сужение
+                            reduction = next((n for n in valid_numbers if 50 <= n <= 70 and n != elongation), reduction)
+                    
+                    # Добавляем данные, если все значения найдены
+                    if strength > 0 and yield_strength > 0 and reduction > 0 and elongation > 0:
+                        data_rows.append({
+                            'Клеймо': sample_mark,
+                            'Температура': temperature,
+                            'Предел прочности': strength,
+                            'Предел текучести': yield_strength,
+                            'Отн. удл.': elongation,
+                            'Отн. суж.': reduction
+                        })
+                        
+                except Exception as e:
+                    continue
     
     if not data_rows:
-        return parse_protocol_from_text('\n'.join([p.text for p in doc.paragraphs]))
+        # Пробуем альтернативный метод парсинга
+        return parse_protocol_alternative(file_content)
     
     return pd.DataFrame(data_rows)
 
-def parse_protocol_from_text(text):
-    """Парсинг данных из текста протокола"""
-    lines = text.split('\n')
+
+def parse_protocol_alternative(file_content):
+    """Альтернативный метод парсинга DOCX файла"""
+    doc = Document(BytesIO(file_content))
+    all_text = []
+    
+    for para in doc.paragraphs:
+        all_text.append(para.text)
+    
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = ' '.join([cell.text.strip() for cell in row.cells])
+            all_text.append(row_text)
+    
+    full_text = '\n'.join(all_text)
+    
+    # Ищем строки с данными
     data_rows = []
+    lines = full_text.split('\n')
     
     for line in lines:
-        if re.search(r'\d+-\d+', line) and any(x in line for x in ['МПа', '485', '297', '57', '30']):
-            line_clean = re.sub(r'\s+', ' ', line.strip())
-            parts = line_clean.split()
+        line_clean = re.sub(r'\s+', ' ', line.strip())
+        
+        # Ищем клеймо в формате "1-1", "2-1" и т.д.
+        клейmo_match = re.search(r'(\d+-\d+)', line_clean)
+        if клейmo_match:
+            sample_mark = клейmo_match.group(1)
             
-            for i, part in enumerate(parts):
-                if re.match(r'^\d+-\d+$', part):
-                    try:
-                        sample_mark = part
-                        
-                        numbers = []
-                        for j in range(i+1, len(parts)):
-                            cleaned = clean_number(parts[j])
-                            if cleaned != 0:
-                                numbers.append(cleaned)
-                        
-                        if len(numbers) >= 12:
-                            temperature = int(numbers[2]) if len(numbers) > 2 else 20
-                            strength = numbers[7] if len(numbers) > 7 else 0
-                            yield_strength = numbers[8] if len(numbers) > 8 else 0
-                            reduction = numbers[9] if len(numbers) > 9 else 0
-                            elongation = numbers[10] if len(numbers) > 10 else 0
+            # Ищем все числа в строке
+            numbers = re.findall(r'\d+[.,]?\d*', line_clean)
+            cleaned_numbers = [clean_number(num) for num in numbers if clean_number(num) > 0]
+            
+            if len(cleaned_numbers) >= 5:  # Нужно минимум 5 чисел: темп, прочн, тек, суж, удл
+                # Определяем температуру (обычно 20 или 403)
+                temperature = 20
+                for num in cleaned_numbers:
+                    if num in [20, 403, 450, 400]:
+                        temperature = int(num)
+                        break
+                
+                # Фильтруем числа по типичным диапазонам
+                strength_candidates = [n for n in cleaned_numbers if 400 <= n <= 600]
+                yield_candidates = [n for n in cleaned_numbers if 200 <= n <= 400]
+                elongation_candidates = [n for n in cleaned_numbers if 20 <= n <= 40]
+                reduction_candidates = [n for n in cleaned_numbers if 50 <= n <= 70]
+                
+                # Если не удалось найти по диапазонам, пробуем логический порядок
+                if not (strength_candidates and yield_candidates and 
+                       elongation_candidates and reduction_candidates):
+                    # Пытаемся определить по порядку (прочность, текучесть, сужение, удлинение)
+                    if len(cleaned_numbers) >= 6:
+                        # Пропускаем температуру и номер
+                        candidates = cleaned_numbers[2:] if temperature in cleaned_numbers else cleaned_numbers
+                        if len(candidates) >= 4:
+                            strength = candidates[0] if 400 <= candidates[0] <= 600 else 0
+                            yield_strength = candidates[1] if 200 <= candidates[1] <= 400 else 0
+                            reduction = candidates[2] if 50 <= candidates[2] <= 70 else 0
+                            elongation = candidates[3] if 20 <= candidates[3] <= 40 else 0
                             
-                            data_rows.append({
-                                'Клеймо': sample_mark,
-                                'Температура': temperature,
-                                'Предел прочности': strength,
-                                'Предел текучести': yield_strength,
-                                'Отн. удл.': elongation,
-                                'Отн. суж.': reduction
-                            })
-                            
-                    except:
-                        continue
+                            if strength and yield_strength and reduction and elongation:
+                                data_rows.append({
+                                    'Клеймо': sample_mark,
+                                    'Температура': temperature,
+                                    'Предел прочности': strength,
+                                    'Предел текучести': yield_strength,
+                                    'Отн. удл.': elongation,
+                                    'Отн. суж.': reduction
+                                })
+                                continue
+                
+                # Стандартный подход
+                if (strength_candidates and yield_candidates and 
+                    elongation_candidates and reduction_candidates):
+                    
+                    # Берем первые подходящие значения
+                    strength = strength_candidates[0]
+                    yield_strength = yield_candidates[0]
+                    elongation = elongation_candidates[0]
+                    reduction = reduction_candidates[0]
+                    
+                    data_rows.append({
+                        'Клеймо': sample_mark,
+                        'Температура': temperature,
+                        'Предел прочности': strength,
+                        'Предел текучести': yield_strength,
+                        'Отн. удл.': elongation,
+                        'Отн. суж.': reduction
+                    })
     
     return pd.DataFrame(data_rows)
+
 
 def parse_mapping_file(mapping_file):
     """Парсинг файла соответствия названий образцов"""
@@ -326,6 +480,10 @@ def get_test_data():
         {'Клеймо': '7-2', 'Температура': 20, 'Предел прочности': 499, 'Предел текучести': 314, 'Отн. удл.': 35, 'Отн. суж.': 57},
         {'Клеймо': '7-3', 'Температура': 403, 'Предел прочности': 459, 'Предел текучести': 278, 'Отн. удл.': 28, 'Отн. суж.': 67},
         {'Клеймо': '7-4', 'Температура': 403, 'Предел прочности': 457, 'Предел текучести': 264, 'Отн. удл.': 24, 'Отн. суж.': 63},
+        {'Клеймо': '8-1', 'Температура': 20, 'Предел прочности': 465, 'Предел текучести': 238, 'Отн. удл.': 36, 'Отн. суж.': 60},
+        {'Клеймо': '8-2', 'Температура': 20, 'Предел прочности': 472, 'Предел текучести': 268, 'Отн. удл.': 30, 'Отн. суж.': 61},
+        {'Клеймо': '8-3', 'Температура': 403, 'Предел прочности': 419, 'Предел текучести': 261, 'Отн. удл.': 29, 'Отн. суж.': 65},
+        {'Клеймо': '8-4', 'Температура': 403, 'Предел прочности': 413, 'Предел текучести': 239, 'Отн. удл.': 31, 'Отн. суж.': 59},
     ]
     
     return pd.DataFrame(test_data)
@@ -713,7 +871,7 @@ def main():
         st.markdown("---")
         
         st.subheader("Параметры обработки")
-        use_test_data = st.checkbox("Использовать тестовые данные", value=True,
+        use_test_data = st.checkbox("Использовать тестовые данные", value=False,
                                    help="Использовать примерные данные для демонстрации")
         
         st.subheader("Выбор марки стали")
@@ -753,15 +911,31 @@ def main():
                 if use_test_data:
                     df = get_test_data()
                     file_source = "тестовые данные"
+                    st.success("✅ Используются тестовые данные (32 образца, 8 труб)")
                 else:
                     file_content = uploaded_protocol.read()
-                    df = parse_protocol_from_docx(file_content)
+                    try:
+                        df = parse_protocol_from_docx(file_content)
+                        if df.empty:
+                            st.warning("Основной метод парсинга не дал результатов. Пробуем альтернативный метод...")
+                            df = parse_protocol_alternative(file_content)
+                    except Exception as e:
+                        st.warning(f"Ошибка при основном парсинге: {e}. Пробуем альтернативный метод...")
+                        df = parse_protocol_alternative(file_content)
+                    
                     file_source = uploaded_protocol.name
+                    st.success(f"✅ Файл {file_source} успешно обработан")
                 
                 if df.empty:
                     st.error("Не удалось извлечь данные из файла.")
-                    st.info("Попробуйте включить опцию 'Использовать тестовые данные'")
+                    st.info("Попробуйте включить опцию 'Использовать тестовые данные' для демонстрации")
                     return
+                
+                # Показываем информацию о загруженных данных
+                st.info(f"Извлечено {len(df)} строк данных")
+                with st.expander("📊 Просмотр извлеченных данных"):
+                    st.dataframe(df)
+                    st.write(f"Уникальные номера труб: {sorted(df['Клеймо'].apply(lambda x: int(x.split('-')[0])).unique())}")
                 
                 # Создаем таблицы
                 detailed_df, non_conformities, sample_boundaries = create_detailed_dataframe(df, mapping, steel_grade)
@@ -781,6 +955,8 @@ def main():
                 # Показываем информацию о несоответствиях
                 if non_conformities:
                     st.warning(f"⚠️ Найдены {len(non_conformities)} значений, не соответствующих нормативам")
+                else:
+                    st.success("✅ Все значения соответствуют нормативам")
                 
                 # Предпросмотр
                 st.subheader("📋 Предпросмотр основной таблицы")
@@ -822,6 +998,7 @@ def main():
                 
         except Exception as e:
             st.error(f"Ошибка при обработке: {str(e)}")
+            st.exception(e)
     
     else:
         # Инструкция
